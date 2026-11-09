@@ -29,4 +29,4 @@ file "$APP/Contents/MacOS/TzoneConfig"
 codesign --force --deep --sign - "$APP"
 codesign -vvv "$APP"
 ditto -c -k --keepParent "$APP" TzoneConfig-Mac.zip
-echo "Built $APP"
+echo "Built $APP
