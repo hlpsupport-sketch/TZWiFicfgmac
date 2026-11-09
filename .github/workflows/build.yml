@@ -4,11 +4,21 @@ on:
   workflow_dispatch:
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build universal app
-        run: ./build_app.sh
+        run: |
+          set +e
+          bash build_app.sh 2>&1 | tee build.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" != "0" ]; then
+            echo "::error title=Build failed::exit $code"
+            ls -la | head -20 | while read -r l; do echo "::notice title=files::$l"; done
+            grep -E "error|Error|fatal" build.log | head -25 | while read -r l; do echo "::error title=compiler::$l"; done
+            tail -15 build.log | while read -r l; do echo "::warning title=tail::$l"; done
+          fi
+          exit $code
       - uses: actions/upload-artifact@v4
         with:
           name: TzoneConfig-Mac
