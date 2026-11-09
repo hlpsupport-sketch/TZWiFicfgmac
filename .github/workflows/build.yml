@@ -8,6 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build universal app
+        working-directory: TzoneConfig-Native
         run: |
           set +e
           bash build_app.sh 2>&1 | tee build.log
@@ -22,4 +23,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: TzoneConfig-Mac
-          path: TzoneConfig-Mac.zip
+          path: TzoneConfig-Native/TzoneConfig-Mac.zip
