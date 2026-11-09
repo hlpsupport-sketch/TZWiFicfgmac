@@ -71,8 +71,8 @@ static NSString *local_time_from_fields(NSArray<NSString *> *p) {
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property (strong) NSWindow *window;
 @property (strong) NSTextField *model, *firmware, *devID, *devTime, *ssid, *pass, *status;
-@property (strong) NSButton *readBtn, *saveBtn, *copyBtn;
-@property BOOL busy;
+@property (strong) NSButton *readBtn, *saveBtn, *idBtn;
+@property (nonatomic) BOOL busy;
 @end
 
 @implementation AppDelegate
@@ -106,8 +106,8 @@ static NSString *local_time_from_fields(NSArray<NSString *> *p) {
     [self labelAt:y text:@"WiFi name"];     self.ssid     = [self fieldAt:y editable:YES]; y -= 34;
     [self labelAt:y text:@"WiFi password"]; self.pass     = [self fieldAt:y editable:YES]; y -= 50;
 
-    self.copyBtn = [NSButton buttonWithTitle:@"Copy ID" target:self action:@selector(copyID:)];
-    self.copyBtn.frame = NSMakeRect(420, 229, 85, 28);
+    self.idBtn = [NSButton buttonWithTitle:@"Copy ID" target:self action:@selector(copyID:)];
+    self.idBtn.frame = NSMakeRect(420, 229, 85, 28);
     self.readBtn = [NSButton buttonWithTitle:@"Read" target:self action:@selector(doRead:)];
     self.readBtn.frame = NSMakeRect(330, y, 80, 30);
     self.saveBtn = [NSButton buttonWithTitle:@"Save" target:self action:@selector(doSave:)];
@@ -115,7 +115,7 @@ static NSString *local_time_from_fields(NSArray<NSString *> *p) {
     self.saveBtn.enabled = NO;
     self.status = [NSTextField wrappingLabelWithString:@"Plug in the logger and press Read."];
     self.status.frame = NSMakeRect(20, y - 4, 300, 40);
-    for (NSView *v in @[self.copyBtn, self.readBtn, self.saveBtn, self.status]) [self.window.contentView addSubview:v];
+    for (NSView *v in @[self.idBtn, self.readBtn, self.saveBtn, self.status]) [self.window.contentView addSubview:v];
 
     [self.window center];
     [self.window makeKeyAndOrderFront:nil];
