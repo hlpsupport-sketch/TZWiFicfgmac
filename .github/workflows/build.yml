@@ -1,0 +1,15 @@
+name: Build Mac app
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal app
+        run: ./build_app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TzoneConfig-Mac
+          path: TzoneConfig-Mac.zip
