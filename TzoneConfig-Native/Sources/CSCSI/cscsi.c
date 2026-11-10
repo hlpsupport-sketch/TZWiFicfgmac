@@ -52,6 +52,21 @@ static int is_logger(io_service_t s, const char *vendor, const char *product) {
     return strcmp(v, vendor) == 0 && strcmp(p, product) == 0;
 }
 
+#define MAX_ALL 96
+
+static void add_related(io_service_t s, io_service_t *all, int *n) {
+    IOOptionBits modes[2] = { kIORegistryIterateRecursively | kIORegistryIterateParents, kIORegistryIterateRecursively };
+    for (int k = 0; k < 2; k++) {
+        io_iterator_t it = 0;
+        if (IORegistryEntryCreateIterator(s, kIOServicePlane, modes[k], &it) != KERN_SUCCESS) continue;
+        io_service_t e;
+        while ((e = IOIteratorNext(it))) {
+            if (*n < MAX_ALL) all[(*n)++] = e; else IOObjectRelease(e);
+        }
+        IOObjectRelease(it);
+    }
+}
+
 int tz_open(const char *vendor, const char *product, TzDev **out, char *err, size_t errlen) {
     *out = NULL;
     io_service_t cand[MAX_CAND]; int n = 0;
@@ -98,10 +113,14 @@ int tz_open(const char *vendor, const char *product, TzDev **out, char *err, siz
         (void)system(cmd);
     }
 
+    io_service_t all[MAX_ALL]; int na = 0;
+    for (int i = 0; i < m && na < MAX_ALL; i++) all[na++] = mine[i];
+    for (int i = 0; i < m; i++) add_related(mine[i], all, &na);
+
     IOReturn lastkr = kIOReturnUnsupported; const char *stage = "plug-in";
-    for (int i = 0; i < m; i++) {
+    for (int i = 0; i < na; i++) {
         IOCFPlugInInterface **plugin = NULL; SInt32 score = 0;
-        IOReturn kr = IOCreatePlugInInterfaceForService(mine[i], kIOSCSITaskDeviceUserClientTypeID,
+        IOReturn kr = IOCreatePlugInInterfaceForService(all[i], kIOSCSITaskDeviceUserClientTypeID,
                                                         kIOCFPlugInInterfaceID, &plugin, &score);
         if (kr != kIOReturnSuccess || !plugin) { lastkr = kr; stage = "plug-in"; continue; }
         SCSITaskDeviceInterface **dev = NULL;
@@ -112,14 +131,14 @@ int tz_open(const char *vendor, const char *product, TzDev **out, char *err, siz
             (*dev)->Release(dev); IODestroyPlugInInterface(plugin);
             lastkr = kr; stage = "exclusive access"; continue;
         }
-        d->plugin = plugin; d->dev = dev; d->exclusive = 1; d->service = mine[i];
-        for (int j = 0; j < m; j++) if (j != i) IOObjectRelease(mine[j]);
+        d->plugin = plugin; d->dev = dev; d->exclusive = 1; d->service = all[i];
+        for (int j = 0; j < na; j++) if (j != i) IOObjectRelease(all[j]);
         *out = d;
         return 0;
     }
     set_err(err, errlen, "Could not open the logger (%s step, IOKit error 0x%x, %d candidate(s)). "
-                         "If its disk is still shown in Finder, eject it and try again.", stage, (unsigned)lastkr, m);
-    for (int j = 0; j < m; j++) IOObjectRelease(mine[j]);
+                         "If its disk is still shown in Finder, eject it and try again.", stage, (unsigned)lastkr, na);
+    for (int j = 0; j < na; j++) IOObjectRelease(all[j]);
     tz_close(d);
     return 3;
 }
