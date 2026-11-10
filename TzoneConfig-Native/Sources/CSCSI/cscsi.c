@@ -35,67 +35,93 @@ static int string_prop(io_service_t s, const char *key, IOOptionBits opts, char 
     return ok;
 }
 
+#define MAX_CAND 24
+
+static void collect(io_iterator_t it, io_service_t *cand, int *n) {
+    io_service_t s;
+    while ((s = IOIteratorNext(it))) {
+        if (*n < MAX_CAND) cand[(*n)++] = s; else IOObjectRelease(s);
+    }
+}
+
+static int is_logger(io_service_t s, const char *vendor, const char *product) {
+    char v[128] = "", p[128] = "";
+    IOOptionBits up = kIORegistryIterateRecursively | kIORegistryIterateParents;
+    string_prop(s, "Vendor Identification", up, v, sizeof v);
+    string_prop(s, "Product Identification", up, p, sizeof p);
+    return strcmp(v, vendor) == 0 && strcmp(p, product) == 0;
+}
+
 int tz_open(const char *vendor, const char *product, TzDev **out, char *err, size_t errlen) {
     *out = NULL;
+    io_service_t cand[MAX_CAND]; int n = 0;
     io_iterator_t it = 0;
-    if (IOServiceGetMatchingServices(0, IOServiceMatching("IOSCSIPeripheralDeviceNub"), &it) != KERN_SUCCESS) {
-        set_err(err, errlen, "Could not query macOS for SCSI devices.");
-        return 1;
+
+    /* A) Services that publish the SCSI task user-client category (Apple's documented route). */
+    CFMutableDictionaryRef mA = IOServiceMatching("IOService");
+    CFMutableDictionaryRef pm = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(pm, CFSTR("SCSITaskDeviceCategory"), CFSTR("SCSITaskUserClientDevice"));
+    CFDictionarySetValue(mA, CFSTR(kIOPropertyMatchKey), pm);
+    CFRelease(pm);
+    if (IOServiceGetMatchingServices(0, mA, &it) == KERN_SUCCESS) { collect(it, cand, &n); IOObjectRelease(it); }
+
+    /* B) The peripheral-device nubs themselves (what version 1 tried). */
+    if (IOServiceGetMatchingServices(0, IOServiceMatching("IOSCSIPeripheralDeviceNub"), &it) == KERN_SUCCESS) {
+        collect(it, cand, &n); IOObjectRelease(it);
     }
-    io_service_t svc, found = 0;
-    int others = 0;
-    while ((svc = IOIteratorNext(it))) {
-        char v[128] = "", p[128] = "";
-        string_prop(svc, "Vendor Identification", kIORegistryIterateRecursively | kIORegistryIterateParents, v, sizeof v);
-        string_prop(svc, "Product Identification", kIORegistryIterateRecursively | kIORegistryIterateParents, p, sizeof p);
-        if (strcmp(v, vendor) == 0 && strcmp(p, product) == 0) { found = svc; break; }
-        others++;
-        IOObjectRelease(svc);
+
+    /* Keep only entries that belong to the logger. */
+    io_service_t mine[MAX_CAND]; int m = 0;
+    for (int i = 0; i < n; i++) {
+        if (is_logger(cand[i], vendor, product)) mine[m++] = cand[i]; else IOObjectRelease(cand[i]);
     }
-    IOObjectRelease(it);
-    if (!found) {
+    if (m == 0) {
         set_err(err, errlen, "No Tzone logger found. Plug it in with the USB cable and try again.");
         return 2;
     }
 
     TzDev *d = calloc(1, sizeof *d);
-    d->service = found;
 
-    /* Whole-disk BSD name (child IOMedia) so we can unmount it. */
-    char bsd[64] = "";
-    if (string_prop(found, "BSD Name", kIORegistryIterateRecursively, bsd, sizeof bsd) && strncmp(bsd, "disk", 4) == 0) {
-        size_t i = 4; while (isdigit((unsigned char)bsd[i])) i++;
-        bsd[i] = 0;                      /* strip partition suffix "sN" */
-        snprintf(d->disk, sizeof d->disk, "%s", bsd);
+    /* Whole-disk BSD name (child IOMedia) so we can unmount it first. */
+    for (int i = 0; i < m && !d->disk[0]; i++) {
+        char bsd[64] = "";
+        if (string_prop(mine[i], "BSD Name", kIORegistryIterateRecursively, bsd, sizeof bsd) && strncmp(bsd, "disk", 4) == 0) {
+            size_t k = 4; while (isdigit((unsigned char)bsd[k])) k++;
+            bsd[k] = 0;
+            snprintf(d->disk, sizeof d->disk, "%s", bsd);
+        }
+    }
+    if (d->disk[0]) {
         char cmd[160];
         snprintf(cmd, sizeof cmd, "/usr/sbin/diskutil unmountDisk /dev/%s >/dev/null 2>&1", d->disk);
         (void)system(cmd);
     }
 
-    SInt32 score = 0;
-    IOReturn kr = IOCreatePlugInInterfaceForService(found, kIOSCSITaskDeviceUserClientTypeID,
-                                                    kIOCFPlugInInterfaceID, &d->plugin, &score);
-    if (kr != kIOReturnSuccess || !d->plugin) {
-        set_err(err, errlen, "Could not open the logger (IOKit error 0x%x).", (unsigned)kr);
-        tz_close(d);
-        return 3;
+    IOReturn lastkr = kIOReturnUnsupported; const char *stage = "plug-in";
+    for (int i = 0; i < m; i++) {
+        IOCFPlugInInterface **plugin = NULL; SInt32 score = 0;
+        IOReturn kr = IOCreatePlugInInterfaceForService(mine[i], kIOSCSITaskDeviceUserClientTypeID,
+                                                        kIOCFPlugInInterfaceID, &plugin, &score);
+        if (kr != kIOReturnSuccess || !plugin) { lastkr = kr; stage = "plug-in"; continue; }
+        SCSITaskDeviceInterface **dev = NULL;
+        HRESULT hr = (*plugin)->QueryInterface(plugin, CFUUIDGetUUIDBytes(kIOSCSITaskDeviceInterfaceID), (LPVOID *)&dev);
+        if (hr != S_OK || !dev) { IODestroyPlugInInterface(plugin); lastkr = kIOReturnUnsupported; stage = "interface"; continue; }
+        kr = (*dev)->ObtainExclusiveAccess(dev);
+        if (kr != kIOReturnSuccess) {
+            (*dev)->Release(dev); IODestroyPlugInInterface(plugin);
+            lastkr = kr; stage = "exclusive access"; continue;
+        }
+        d->plugin = plugin; d->dev = dev; d->exclusive = 1; d->service = mine[i];
+        for (int j = 0; j < m; j++) if (j != i) IOObjectRelease(mine[j]);
+        *out = d;
+        return 0;
     }
-    HRESULT hr = (*d->plugin)->QueryInterface(d->plugin,
-                    CFUUIDGetUUIDBytes(kIOSCSITaskDeviceInterfaceID), (LPVOID *)&d->dev);
-    if (hr != S_OK || !d->dev) {
-        set_err(err, errlen, "The logger does not expose a SCSI interface to apps.");
-        tz_close(d);
-        return 4;
-    }
-    kr = (*d->dev)->ObtainExclusiveAccess(d->dev);
-    if (kr != kIOReturnSuccess) {
-        set_err(err, errlen, "The logger is in use by macOS (error 0x%x). Eject its disk in Finder and try again.", (unsigned)kr);
-        tz_close(d);
-        return 5;
-    }
-    d->exclusive = 1;
-    *out = d;
-    return 0;
+    set_err(err, errlen, "Could not open the logger (%s step, IOKit error 0x%x, %d candidate(s)). "
+                         "If its disk is still shown in Finder, eject it and try again.", stage, (unsigned)lastkr, m);
+    for (int j = 0; j < m; j++) IOObjectRelease(mine[j]);
+    tz_close(d);
+    return 3;
 }
 
 int tz_exec(TzDev *d, const uint8_t *cdb, uint8_t cdb_len, int dir,
