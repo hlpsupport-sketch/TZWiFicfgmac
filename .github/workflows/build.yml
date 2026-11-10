@@ -17,11 +17,21 @@ jobs:
       HAS_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Locate app folder
+        run: |
+          F=$(find . -name build_app.sh -not -path './.git/*' | head -1)
+          if [ -z "$F" ]; then
+            echo "::error title=Missing::build_app.sh was not found anywhere in the repository. Files present:"
+            find . -not -path './.git/*' -not -path './.git' | head -40 | while read -r l; do echo "::error title=repo file::$l"; done
+            exit 1
+          fi
+          echo "APPDIR=$(dirname "$F")" >> "$GITHUB_ENV"
+          echo "Found app folder: $(dirname "$F")"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Build app
-        working-directory: TzoneConfig-App
+        working-directory: ${{ env.APPDIR }}
         run: |
           set +e
           bash build_app.sh 2>&1 | tee build.log
@@ -51,7 +61,7 @@ jobs:
           rm -f "$RUNNER_TEMP/cert.p12"
       - name: Sign and notarize
         if: env.HAS_CERT == 'true'
-        working-directory: TzoneConfig-App
+        working-directory: ${{ env.APPDIR }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
@@ -67,12 +77,12 @@ jobs:
           exit $code
       - name: Ad-hoc sign (no certificate configured)
         if: env.HAS_CERT != 'true'
-        working-directory: TzoneConfig-App
+        working-directory: ${{ env.APPDIR }}
         run: codesign --force --deep --sign - "dist/Tzone Config.app"
       - name: Zip
-        working-directory: TzoneConfig-App
+        working-directory: ${{ env.APPDIR }}
         run: ditto -c -k --keepParent "dist/Tzone Config.app" "TzoneConfig-${{ matrix.name }}.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: TzoneConfig-${{ matrix.name }}
-          path: TzoneConfig-App/TzoneConfig-${{ matrix.name }}.zip
+          path: ${{ env.APPDIR }}/TzoneConfig-${{ matrix.name }}.zip
