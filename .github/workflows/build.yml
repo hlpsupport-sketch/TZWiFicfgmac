@@ -4,23 +4,75 @@ on:
   workflow_dispatch:
 jobs:
   build:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: AppleSilicon
+          - os: macos-15-intel
+            name: Intel
+    runs-on: ${{ matrix.os }}
+    env:
+      HAS_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Build universal app
-        working-directory: TzoneConfig-Native
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build app
+        working-directory: TzoneConfig-App
         run: |
           set +e
           bash build_app.sh 2>&1 | tee build.log
           code=${PIPESTATUS[0]}
           if [ "$code" != "0" ]; then
             echo "::error title=Build failed::exit $code"
-            ls -la | head -20 | while read -r l; do echo "::notice title=files::$l"; done
-            grep -E "error|Error|fatal" build.log | head -25 | while read -r l; do echo "::error title=compiler::$l"; done
+            grep -E "rror|Traceback|fatal" build.log | head -25 | while read -r l; do echo "::error title=compiler::$l"; done
             tail -15 build.log | while read -r l; do echo "::warning title=tail::$l"; done
           fi
           exit $code
+      - name: Import signing certificate
+        if: env.HAS_CERT == 'true'
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KCPASS="$(uuidgen)"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KCPASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KCPASS" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPASS" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/cert.p12"
+      - name: Sign and notarize
+        if: env.HAS_CERT == 'true'
+        working-directory: TzoneConfig-App
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set +e
+          bash sign_and_notarize.sh 2>&1 | tee sign.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" != "0" ]; then
+            echo "::error title=Signing failed::exit $code"
+            tail -40 sign.log | while read -r l; do echo "::error title=sign::$l"; done
+          fi
+          exit $code
+      - name: Ad-hoc sign (no certificate configured)
+        if: env.HAS_CERT != 'true'
+        working-directory: TzoneConfig-App
+        run: codesign --force --deep --sign - "dist/Tzone Config.app"
+      - name: Zip
+        working-directory: TzoneConfig-App
+        run: ditto -c -k --keepParent "dist/Tzone Config.app" "TzoneConfig-${{ matrix.name }}.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: TzoneConfig-Mac
-          path: TzoneConfig-Native/TzoneConfig-Mac.zip
+          name: TzoneConfig-${{ matrix.name }}
+          path: TzoneConfig-App/TzoneConfig-${{ matrix.name }}.zip
